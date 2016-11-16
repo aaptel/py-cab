@@ -13,8 +13,7 @@ def md5(buf):
     h.update(buf)
     return h.hexdigest()
 
-def main():
-    buf = open(sys.argv[1], "rb").read()
+def dump(buf):
     cab = CABFile(buf)
     cab.dump()
     print("\n\n\n")
@@ -27,6 +26,24 @@ def main():
             if len(data) > 10:
                 data = "%s... (%d)"%(data[:10], len(data))
             print("%s : %s (MD5:%s)"%(fn, data, cksum))
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: cab.py [xcz] ...")
+        exit(1)
+
+    op, args = sys.argv[1], sys.argv[2:]
+    if 'x' in op:
+        dump(open(args[0], "rb").read())
+    elif 'c' in op:
+        layout = [[[b"fichierrrrr", b"A"*40000]]]
+        buf = make_cab(layout, compress=('z' in op))
+        fn='/tmp/cabtest'
+        open(fn, "wb+").write(buf)
+        print("wrote %s"%fn)
+
+        print("\n\n")
+        dump(buf)
 
 # <     little-endian
 # >     big-endian
@@ -180,7 +197,6 @@ class CABFile:
 
         return files
 
-
 def decompress_mzip(chunks):
     # remove 'CK' bytes from each CDATA buffer
     chunks = [x[2:] for x in chunks]
@@ -232,6 +248,22 @@ class BinReader:
                 return (s,)
             s += bytes(r)
 
+class BinWriter:
+    def __init__(self):
+        self.buf = bytearray(b'')
+        self.off = 0
+
+    def write(self, fmt, *args):
+        self.buf += struct.pack(fmt, *args)
+        self.off = len(self.buf)
+
+    def write_at(self, off, fmt, *args):
+        struct.pack_into(fmt, self.buf, off, *args)
+
+    def append(self, buf):
+        self.buf += buf
+        self.off = len(self.buf)
+
 class Blob:
     def __init__(self, buf):
         self.br = BinReader(buf)
@@ -261,6 +293,106 @@ class Blob:
                 if len(v) > 30:
                     v = '%s... (%d bytes)'%(v[0:30], len(v))
             print("%-20.20s %s"%(k, v))
+
+
+def make_cdatas(data, compress=True):
+    start_off = 0
+    max_chunk_size = 32768
+    data_size = len(data)
+    remaining = data_size
+    res = []
+    z = zlib.compressobj(wbits=-15)
+
+    while start_off < data_size:
+        output = BinWriter()
+
+        chunk_size = min(max_chunk_size, remaining)
+        chunk = data[start_off:start_off+chunk_size]
+
+        output.write('<I', 0)
+
+        if compress:
+            c = b'CK'+z.compress(chunk)
+            c += z.flush(zlib.Z_FINISH if chunk_size == remaining else zlib.Z_FULL_FLUSH)
+        else:
+            c = chunk
+
+        output.write('<HH', len(c), len(chunk))
+        output.append(c)
+        csum = checksum(output.buf[4:])
+        print("csum = %d"%csum)
+        output.write_at(0, '<I', csum)
+        res.append(output.buf)
+
+        start_off += chunk_size
+        remaining -= chunk_size
+
+    return res
+
+def make_cab(layout, compress=True):
+
+    nb_folder = len(layout)
+    nb_files = sum([len(f) for f in layout])
+
+    b = BinWriter()
+    b.write('cccc', b'M', b'S', b'C', b'F') #sig
+    b.write('<I', 0) #res1
+    total_size_off = b.off
+    b.write('<I', 0) #cbCabinet
+    b.write('<I', 0) #res2
+    first_file_off = b.off
+    b.write('<I', 0) # coffFiles
+    b.write('<I', 0) #res3
+    b.write('<BBHH', 3, 1, nb_folder, nb_files)
+    b.write('<H', 0) #flags
+    b.write('<H', 42) #setID
+    b.write('<H', 0) #icabinet
+
+    folders = []
+
+    # write all CFFOLDER
+    for fol in layout:
+        f = {}
+        data = b''.join([data for fn,data in fol])
+        f['cdata'] = make_cdatas(data, compress)
+        f['coffCabStart_off'] = b.off
+        b.write('<I', 0)
+        b.write('<HH', len(f['cdata']), (1 if compress else 0))
+
+        f['fsize'] = []
+        f['foff'] = []
+        f['name'] = []
+        o = 0
+        for fn,data in fol:
+            print("MD5=%s"%md5(data))
+            f['fsize'].append(len(data))
+            f['foff'].append(o)
+            f['name'].append(fn)
+            o += len(data)
+
+        folders.append(f)
+
+    b.write_at(first_file_off, '<I', b.off)
+
+    # write all CFFILE
+    for i,fol in enumerate(folders):
+        for j in range(len(fol['fsize'])):
+            b.write('<I', fol['fsize'][j])
+            b.write('<I', fol['foff'][j])
+            b.write('<H', i) #ifolder
+            b.write('<HHH', 0,0,0) #date,time,attrib
+            b.append(fol['name'][j])
+            b.write('B', 0)
+
+
+    # write all CDATA
+    for fol in folders:
+        b.write_at(fol['coffCabStart_off'], '<I', b.off)
+        for c in fol['cdata']:
+            b.append(c)
+
+    b.write_at(total_size_off, '<I', b.off)
+    return b.buf
 
 
 if __name__ == '__main__':
