@@ -7,6 +7,7 @@ from collections import OrderedDict
 import argparse
 import zlib
 import hashlib
+import random
 
 def md5(buf):
     h = hashlib.md5()
@@ -36,8 +37,18 @@ def main():
     if 'x' in op:
         dump(open(args[0], "rb").read())
     elif 'c' in op:
-        layout = [[[b"fichierrrrr", b"A"*40000]]]
-        buf = make_cab(layout, compress=('z' in op))
+        layout_simple = [[[b"file", b'A'*70000]]]
+        layout_random = [
+            [
+                [b"A/file1", bytes([random.randint(60,60+25) for i in range(70000)])],
+                [b"A/file2", bytes([random.randint(60,60+25) for i in range(70000)])]
+            ],
+            [
+                [b"B/file1", bytes([random.randint(60,60+25) for i in range(70000)])],
+                [b"B/file2", bytes([random.randint(60,60+25) for i in range(70000)])]
+            ],
+        ]
+        buf = make_cab(layout_simple, compress=('z' in op))
         fn='/tmp/cabtest'
         open(fn, "wb+").write(buf)
         print("wrote %s"%fn)
@@ -199,16 +210,25 @@ class CABFile:
 
 def decompress_mzip(chunks):
     # remove 'CK' bytes from each CDATA buffer
+    for x in chunks:
+        if not(x[0]==b'C'[0] and x[1]==b'K'[0]):
+            print("[!!] weird chunk <%s>"%x)
+            exit(1)
+
     chunks = [x[2:] for x in chunks]
     output_chunks = []
+    zdict = b''
 
     for i, c in enumerate(chunks):
+        print("decompress chunk %d"%i)
+        out = b''
         # https://blogs.kde.org/2008/01/04/kcabinet-mostly-working
-        if i == 0:
-            d = zlib.decompressobj(-15, zdict=b'')
-        else:
-            d = zlib.decompressobj(-15, zdict=output_chunks[i-1])
-        output_chunks.append(d.decompress(c))
+        z = zlib.decompressobj(wbits=-15, zdict=zdict)
+        #out += zlib.decompress(c, 15)
+        out += z.decompress(c)
+        out += z.flush()
+        zdict = out
+        output_chunks.append(out)
 
     return b''.join(output_chunks)
 
@@ -301,7 +321,7 @@ def make_cdatas(data, compress=True):
     data_size = len(data)
     remaining = data_size
     res = []
-    z = zlib.compressobj(wbits=-15)
+    zdict = b''
 
     while start_off < data_size:
         output = BinWriter()
@@ -312,8 +332,13 @@ def make_cdatas(data, compress=True):
         output.write('<I', 0)
 
         if compress:
-            c = b'CK'+z.compress(chunk)
-            c += z.flush(zlib.Z_FINISH if chunk_size == remaining else zlib.Z_FULL_FLUSH)
+            z = zlib.compressobj(wbits=-15, zdict=zdict)
+            c = b'CK'
+            c += z.compress(chunk)
+            c += z.flush(zlib.Z_FINISH)
+            #c += z.flush(zlib.Z_FULL_FLUSH)
+            #c += z.flush(zlib.Z_FINISH if chunk_size == remaining else zlib.Z_SYNC_FLUSH)
+            #c += z.flush(zlib.Z_FINISH if chunk_size == remaining else zlib.Z_FULL_FLUSH)
         else:
             c = chunk
 
@@ -324,6 +349,7 @@ def make_cdatas(data, compress=True):
         output.write_at(0, '<I', csum)
         res.append(output.buf)
 
+        zdict = chunk
         start_off += chunk_size
         remaining -= chunk_size
 
